@@ -1,0 +1,621 @@
+//@version=6
+
+indicator("VWAP Sigma Bands", overlay=true)
+
+
+
+//────────────────────────────────────
+
+// INPUTS
+
+//────────────────────────────────────
+
+
+
+devUp1 = input.float(1.28, title="Upper Band 1 (σ)", step=0.01)
+
+devDn1 = input.float(1.28, title="Lower Band 1 (σ)", step=0.01)
+
+
+
+devUp2 = input.float(2.01, title="Upper Band 2 (σ)", step=0.01)
+
+devDn2 = input.float(2.01, title="Lower Band 2 (σ)", step=0.01)
+
+
+
+devUp3 = input.float(2.51, title="Upper Band 3 (σ)", step=0.01)
+
+devDn3 = input.float(2.51, title="Lower Band 3 (σ)", step=0.01)
+
+
+
+devUp4 = input.float(3.09, title="Upper Band 4 (σ)", step=0.01)
+
+devDn4 = input.float(3.09, title="Lower Band 4 (σ)", step=0.01)
+
+
+
+devUp5 = input.float(4.01, title="Upper Band 5 (σ)", step=0.01)
+
+devDn5 = input.float(4.01, title="Lower Band 5 (σ)", step=0.01)
+
+
+
+//────────────────────────────────────
+
+// BAND VISIBILITY
+
+//────────────────────────────────────
+
+
+
+showBand2 = input.bool(true,  title="Show ±2.01σ Bands")
+
+showBand3 = input.bool(true,  title="Show ±2.51σ Bands")
+
+showBand4 = input.bool(false, title="Show ±3.09σ Bands")
+
+showBand5 = input.bool(false, title="Show ±4.01σ Bands")
+
+
+
+showPrevVWAP = input.bool(false, title="Show Previous VWAP Close")
+
+
+
+//────────────────────────────────────
+
+// SESSION RESET
+
+//────────────────────────────────────
+
+
+
+newSession = timeframe.change("1D")
+
+
+
+//────────────────────────────────────
+
+// VWAP + VOLUME-WEIGHTED STD DEV
+
+//────────────────────────────────────
+
+
+
+var float vwapSum   = 0.0
+
+var float volumeSum = 0.0
+
+var float v2Sum     = 0.0
+
+
+
+if newSession
+
+    vwapSum   := hl2 * volume
+
+    volumeSum := volume
+
+    v2Sum     := volume * hl2 * hl2
+
+else
+
+    vwapSum   += hl2 * volume
+
+    volumeSum += volume
+
+    v2Sum     += volume * hl2 * hl2
+
+
+
+myVWAP = volumeSum > 0 ? vwapSum / volumeSum : na
+
+
+
+variance = volumeSum > 0 ? math.max(v2Sum / volumeSum - myVWAP * myVWAP, 0.0) : na
+
+
+
+dev = math.sqrt(variance)
+
+
+
+//────────────────────────────────────
+
+// BAND VALUES
+
+//────────────────────────────────────
+
+
+
+upper1 = myVWAP + devUp1 * dev
+
+lower1 = myVWAP - devDn1 * dev
+
+
+
+upper2 = myVWAP + devUp2 * dev
+
+lower2 = myVWAP - devDn2 * dev
+
+
+
+upper3 = myVWAP + devUp3 * dev
+
+lower3 = myVWAP - devDn3 * dev
+
+
+
+upper4 = myVWAP + devUp4 * dev
+
+lower4 = myVWAP - devDn4 * dev
+
+
+
+upper5 = myVWAP + devUp5 * dev
+
+lower5 = myVWAP - devDn5 * dev
+
+
+
+//────────────────────────────────────
+
+// VWAP
+
+// BLUE — DOTTED — THICKER
+
+//────────────────────────────────────
+
+
+
+A = plot(
+
+    myVWAP,
+
+    title="VWAP",
+
+    color=color.blue,
+
+    linewidth=3,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_dotted
+
+)
+
+
+
+//────────────────────────────────────
+
+// ±1.28σ
+
+// GRAY — DOTTED — THICKER
+
+//────────────────────────────────────
+
+
+
+U1 = plot(
+
+    upper1,
+
+    title="+1.28σ",
+
+    color=color.gray,
+
+    linewidth=2,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_dotted
+
+)
+
+
+
+D1 = plot(
+
+    lower1,
+
+    title="-1.28σ",
+
+    color=color.gray,
+
+    linewidth=2,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_dotted
+
+)
+
+
+
+//────────────────────────────────────
+
+// ±2.01σ
+
+// SOLID
+
+//────────────────────────────────────
+
+
+
+U2 = plot(
+
+    showBand2 ? upper2 : na,
+
+    title="+2.01σ",
+
+    color=color.red,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+D2 = plot(
+
+    showBand2 ? lower2 : na,
+
+    title="-2.01σ",
+
+    color=color.green,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+//────────────────────────────────────
+
+// ±2.51σ
+
+// SOLID
+
+//────────────────────────────────────
+
+
+
+U3 = plot(
+
+    showBand3 ? upper3 : na,
+
+    title="+2.51σ",
+
+    color=color.red,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+D3 = plot(
+
+    showBand3 ? lower3 : na,
+
+    title="-2.51σ",
+
+    color=color.green,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+//────────────────────────────────────
+
+// ±3.09σ
+
+// SOLID
+
+//────────────────────────────────────
+
+
+
+U4 = plot(
+
+    showBand4 ? upper4 : na,
+
+    title="+3.09σ",
+
+    color=color.red,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+D4 = plot(
+
+    showBand4 ? lower4 : na,
+
+    title="-3.09σ",
+
+    color=color.green,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+//────────────────────────────────────
+
+// ±4.01σ
+
+// SOLID
+
+//────────────────────────────────────
+
+
+
+U5 = plot(
+
+    showBand5 ? upper5 : na,
+
+    title="+4.01σ",
+
+    color=color.red,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+D5 = plot(
+
+    showBand5 ? lower5 : na,
+
+    title="-4.01σ",
+
+    color=color.green,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+//────────────────────────────────────
+
+// PREVIOUS SESSION VWAP
+
+//────────────────────────────────────
+
+
+
+var float prevVWAP = na
+
+
+
+if newSession
+
+    prevVWAP := myVWAP[1]
+
+
+
+plot(
+
+    showPrevVWAP ? prevVWAP : na,
+
+    title="Previous VWAP",
+
+    color=close > prevVWAP ? color.green : color.red,
+
+    linewidth=1,
+
+    style=plot.style_line,
+
+    linestyle=plot.linestyle_solid
+
+)
+
+
+
+//────────────────────────────────────
+
+// FILLS
+
+//────────────────────────────────────
+
+
+
+// +1.28σ → +2.01σ
+
+fill(
+
+    U1,
+
+    U2,
+
+    color=color.new(color.red, 90),
+
+    title="+1.28σ to +2.01σ"
+
+)
+
+
+
+// -1.28σ → -2.01σ
+
+fill(
+
+    D1,
+
+    D2,
+
+    color=color.new(color.green, 90),
+
+    title="-1.28σ to -2.01σ"
+
+)
+
+
+
+// +2.01σ → +2.51σ
+
+fill(
+
+    U2,
+
+    U3,
+
+    color=color.new(color.red, 90),
+
+    title="+2.01σ to +2.51σ"
+
+)
+
+
+
+// -2.01σ → -2.51σ
+
+fill(
+
+    D2,
+
+    D3,
+
+    color=color.new(color.green, 90),
+
+    title="-2.01σ to -2.51σ"
+
+)
+
+
+
+// +2.51σ → +3.09σ
+
+fill(
+
+    U3,
+
+    U4,
+
+    color=color.new(color.red, 90),
+
+    title="+2.51σ to +3.09σ"
+
+)
+
+
+
+// -2.51σ → -3.09σ
+
+fill(
+
+    D3,
+
+    D4,
+
+    color=color.new(color.green, 90),
+
+    title="-2.51σ to -3.09σ"
+
+)
+
+
+
+// +3.09σ → +4.01σ
+
+fill(
+
+    U4,
+
+    U5,
+
+    color=color.new(color.red, 90),
+
+    title="+3.09σ to +4.01σ"
+
+)
+
+
+
+// -3.09σ → -4.01σ
+
+fill(
+
+    D4,
+
+    D5,
+
+    color=color.new(color.green, 90),
+
+    title="-3.09σ to -4.01σ"
+
+)
+
+
+
+// VWAP → +1.28σ
+
+fill(
+
+    A,
+
+    U1,
+
+    color=color.new(color.gray, 90),
+
+    title="VWAP to +1.28σ"
+
+)
+
+
+
+// VWAP → -1.28σ
+
+fill(
+
+    A,
+
+    D1,
+
+    color=color.new(color.gray, 90),
+
+    title="VWAP to -1.28σ"
+
+)
