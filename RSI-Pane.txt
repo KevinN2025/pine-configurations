@@ -1,0 +1,37 @@
+//@version=6
+
+indicator("RSI Pane", shorttitle="RSI", overlay=false)
+
+
+
+rsiLen = input.int(14, "RSI Length", minval=1)
+
+obLvl  = input.int(70, "Overbought")
+
+osLvl  = input.int(30, "Oversold")
+
+
+
+cTeal = color.new(#26A69A, 0)
+
+cRed  = color.new(#EF5350, 0)
+
+cCyan = color.new(#29B6F6, 0)
+
+
+
+rsiVal = ta.rsi(close, rsiLen)
+
+rsiCol = rsiVal >= obLvl ? cRed : rsiVal <= osLvl ? cTeal : cCyan
+
+
+
+plot(rsiVal, "RSI", color=rsiCol, linewidth=2)
+
+hOB = hline(obLvl, "Overbought", color=color.new(#EF5350, 50), linestyle=hline.style_dashed)
+
+hMid = hline(50,   "Midline",    color=color.new(#787B86, 70), linestyle=hline.style_dotted)
+
+hOS = hline(osLvl, "Oversold",   color=color.new(#26A69A, 50), linestyle=hline.style_dashed)
+
+fill(hOB, hOS, color=color.new(#29B6F6, 96), title="RSI Zone")
