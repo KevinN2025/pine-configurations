@@ -1,0 +1,363 @@
+/@version=6
+
+// LTC Student's t return z-score.
+
+// Same definitions as Crypto/STUDENT-T.md and Crypto/research/ltc_t_zscore.py:
+
+//   r       = log(close / close[1])
+
+//   mu, sd  = mean and sample sd (ddof=1) of the previous `window` returns (current bar excluded)
+
+//   t scale = sd * sqrt((df - 2) / df)
+
+//   score   = (r - mu) / t scale
+
+//   tail    = P(|T_df| >= |score|), two-sided
+
+//   z_eq    = normal z with the same two-sided tail: fat-tail-honest "how unusual is this bar"
+
+// Default df values were fitted on 2 years of Alpaca LTC/USD data (2024-10-14 to 2026-10-14),
+
+// frozen on the first 18 months and checked on the last 6. They are LTC-specific.
+
+// A tail area is not a probability of profit, reversal or continuation.
+
+indicator("LTC Student-t Return Z", shorttitle = "LTC t-Z", overlay = false, precision = 2)
+
+
+
+window   = input.int(120, "Return window (bars, current bar excluded)", minval = 20, maxval = 2000)
+
+dfMode   = input.string("LTC fitted (by timeframe)", "Degrees of freedom",
+
+     options = ["LTC fitted (by timeframe)", "Rolling moments", "Manual"])
+
+dfManual = input.float(4.0, "Manual df", minval = 2.1, maxval = 30.0, step = 0.1)
+
+showRaw  = input.bool(false, "Also plot the normal z (ignores fat tails)")
+
+showTable = input.bool(true, "Show readout table")
+
+
+
+// ---------- Pine-portable statistics (mirrors Crypto/research/t_math.py) ----------
+
+logGamma(float x) =>
+
+    // Lanczos g=7, n=9. Callers here always pass x >= 0.5.
+
+    float y = x - 1.0
+
+    float total = 0.99999999999980993
+
+    total += 676.5203681218851 / (y + 1.0)
+
+    total += -1259.1392167224028 / (y + 2.0)
+
+    total += 771.32342877765313 / (y + 3.0)
+
+    total += -176.61502916214059 / (y + 4.0)
+
+    total += 12.507343278686905 / (y + 5.0)
+
+    total += -0.13857109526572012 / (y + 6.0)
+
+    total += 9.9843695780195716e-6 / (y + 7.0)
+
+    total += 1.5056327351493116e-7 / (y + 8.0)
+
+    float t = y + 7.5
+
+    0.5 * math.log(2.0 * math.pi) + (y + 0.5) * math.log(t) - t + math.log(total)
+
+
+
+betaContinuedFraction(float a, float b, float x) =>
+
+    float tiny = 1e-30
+
+    float qab = a + b
+
+    float qap = a + 1.0
+
+    float qam = a - 1.0
+
+    float c = 1.0
+
+    float d = 1.0 - qab * x / qap
+
+    d := 1.0 / (math.abs(d) > tiny ? d : tiny)
+
+    float h = d
+
+    for m = 1 to 300
+
+        float m2 = 2.0 * m
+
+        float aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+
+        d := 1.0 + aa * d
+
+        d := 1.0 / (math.abs(d) > tiny ? d : tiny)
+
+        c := 1.0 + aa / c
+
+        c := math.abs(c) > tiny ? c : tiny
+
+        h *= d * c
+
+        aa := -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+
+        d := 1.0 + aa * d
+
+        d := 1.0 / (math.abs(d) > tiny ? d : tiny)
+
+        c := 1.0 + aa / c
+
+        c := math.abs(c) > tiny ? c : tiny
+
+        float delta = d * c
+
+        h *= delta
+
+        if math.abs(delta - 1.0) < 3e-14
+
+            break
+
+    h
+
+
+
+regularizedBeta(float a, float b, float x) =>
+
+    float result = 0.0
+
+    if x >= 1.0
+
+        result := 1.0
+
+    else if x > 0.0
+
+        float front = math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * math.log(x) + b * math.log(1.0 - x))
+
+        result := x < (a + 1.0) / (a + b + 2.0) ? front * betaContinuedFraction(a, b, x) / a : 1.0 - front * betaContinuedFraction(b, a, 1.0 - x) / b
+
+    result
+
+
+
+tTwoSided(float x, float nu) =>
+
+    regularizedBeta(nu / 2.0, 0.5, nu / (nu + x * x))
+
+
+
+normalQuantileLower(float p) =>
+
+    // Acklam, lower region p < 0.02425 (the only region z_eq needs for small tails).
+
+    float q = math.sqrt(-2.0 * math.log(p))
+
+    (((((-7.784894002430293e-03 * q - 3.223964580411365e-01) * q - 2.400758277161838e+00) * q - 2.549732539343734e+00) * q + 4.374664141464968e+00) * q + 2.938163982698783e+00) / ((((7.784695709041462e-03 * q + 3.224671290700398e-01) * q + 2.445134137142996e+00) * q + 3.754408661907416e+00) * q + 1.0)
+
+
+
+normalQuantile(float p) =>
+
+    float result = na
+
+    if p < 0.02425
+
+        result := normalQuantileLower(p)
+
+    else if p > 1.0 - 0.02425
+
+        result := -normalQuantileLower(1.0 - p)
+
+    else
+
+        float q = p - 0.5
+
+        float rr = q * q
+
+        result := (((((-3.969683028665376e+01 * rr + 2.209460984245205e+02) * rr - 2.759285104469687e+02) * rr + 1.383577518672690e+02) * rr - 3.066479806614716e+01) * rr + 2.506628277459239e+00) * q / (((((-5.447609879822406e+01 * rr + 1.615858368580409e+02) * rr - 1.556989798598866e+02) * rr + 6.680131188771972e+01) * rr - 1.328068155288572e+01) * rr + 1.0)
+
+    result
+
+
+
+normalEquivalent(float x, float nu) =>
+
+    float p = math.max(tTwoSided(x, nu), 1e-300)
+
+    x == 0.0 ? 0.0 : math.sign(x) * -normalQuantile(p / 2.0)
+
+
+
+// ---------- LTC fitted degrees of freedom (rolling-standardized returns, bounded MLE) ----------
+
+ltcFittedDf() =>
+
+    int s = timeframe.in_seconds()
+
+    s <= 300 ? 5.02 : s <= 900 ? 4.82 : s <= 3600 ? 4.00 : s <= 14400 ? 3.61 : 3.13
+
+
+
+// ---------- Rolling statistics on the previous `window` returns ----------
+
+float r = math.log(close / close[1])
+
+float prev = r[1]
+
+float mu = ta.sma(prev, window)
+
+float sd = ta.stdev(prev, window, false)   // sample sd (ddof = 1)
+
+
+
+// Method-of-moments df from excess kurtosis (needs df > 4): df = 4 + 6 / excess.
+
+float e2 = ta.sma(prev * prev, window)
+
+float e3 = ta.sma(prev * prev * prev, window)
+
+float e4 = ta.sma(prev * prev * prev * prev, window)
+
+float m2 = e2 - mu * mu
+
+float m4 = e4 - 4.0 * mu * e3 + 6.0 * mu * mu * e2 - 3.0 * math.pow(mu, 4)
+
+float excess = m2 > 0 ? m4 / (m2 * m2) - 3.0 : na
+
+float momentsDf = na(excess) ? na : excess <= 0 ? 30.0 : math.min(30.0, math.max(4.1, 4.0 + 6.0 / excess))
+
+
+
+float df = dfMode == "Manual" ? dfManual : dfMode == "Rolling moments" ? momentsDf : ltcFittedDf()
+
+
+
+float tScale = sd * math.sqrt((df - 2.0) / df)
+
+float score = tScale > 0 ? (r - mu) / tScale : na
+
+float rawZ = sd > 0 ? (r - mu) / sd : na
+
+float tail = na(score) ? na : tTwoSided(score, df)
+
+float zEq = na(score) ? na : normalEquivalent(score, df)
+
+
+
+// ---------- Plots ----------
+
+color zColor = na(zEq) ? color.gray : math.abs(zEq) >= 3 ? (zEq > 0 ? color.new(color.lime, 0) : color.new(color.red, 0)) :
+
+     math.abs(zEq) >= 2 ? (zEq > 0 ? color.new(color.teal, 0) : color.new(color.orange, 0)) : color.new(color.gray, 40)
+
+plot(zEq, "t-adjusted z (normal-equivalent)", zColor, 2, plot.style_columns)
+
+plot(showRaw ? rawZ : na, "Normal z (fat-tail blind)", color.new(color.purple, 0), 1)
+
+hline(0, "0", color.new(color.gray, 60))
+
+hline(1, "+1", color.new(color.gray, 75), hline.style_dotted)
+
+hline(-1, "-1", color.new(color.gray, 75), hline.style_dotted)
+
+hline(2, "+2", color.new(color.teal, 50), hline.style_dashed)
+
+hline(-2, "-2", color.new(color.orange, 50), hline.style_dashed)
+
+hline(3, "+3", color.new(color.lime, 40))
+
+hline(-3, "-3", color.new(color.red, 40))
+
+
+
+alertcondition(not na(zEq) and math.abs(zEq) >= 2, "LTC |t-z| >= 2", "LTC {{interval}} return is a >= 2 normal-equivalent move under Student's t")
+
+alertcondition(not na(zEq) and math.abs(zEq) >= 3, "LTC |t-z| >= 3", "LTC {{interval}} return is a >= 3 normal-equivalent move under Student's t")
+
+
+
+// t score whose two-sided tail equals a given two-sided normal tail (bisection; last bar only).
+
+tScoreForTail(float goal, float nu) =>
+
+    float lo = 0.0
+
+    float hi = 1000.0
+
+    for i = 1 to 80
+
+        float mid = 0.5 * (lo + hi)
+
+        if tTwoSided(mid, nu) > goal
+
+            lo := mid
+
+        else
+
+            hi := mid
+
+    0.5 * (lo + hi)
+
+
+
+// Two-sided normal tails: P(|Z| >= 2) and P(|Z| >= 3).
+
+float TAIL2 = 0.04550026389635842
+
+float TAIL3 = 0.0026997960632601866
+
+
+
+var table readout = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 20), border_width = 1)
+
+if showTable and barstate.islast and not na(score)
+
+    float s2 = tScoreForTail(TAIL2, df)
+
+    float s3 = tScoreForTail(TAIL3, df)
+
+    string venue = str.contains(syminfo.ticker, "LTC") ? syminfo.tickerid : syminfo.tickerid + "  (fitted for LTC!)"
+
+    table.cell(readout, 0, 0, "Symbol", text_color = color.silver)
+
+    table.cell(readout, 1, 0, venue, text_color = str.contains(syminfo.ticker, "LTC") ? color.white : color.red)
+
+    table.cell(readout, 0, 1, "df (" + dfMode + ")", text_color = color.silver)
+
+    table.cell(readout, 1, 1, str.tostring(df, "#.##"), text_color = color.white)
+
+    table.cell(readout, 0, 2, "t-adjusted z", text_color = color.silver)
+
+    table.cell(readout, 1, 2, str.tostring(zEq, "+#.##;-#.##"), text_color = zColor)
+
+    table.cell(readout, 0, 3, "Normal z", text_color = color.silver)
+
+    table.cell(readout, 1, 3, str.tostring(rawZ, "+#.##;-#.##"), text_color = color.white)
+
+    table.cell(readout, 0, 4, "Two-sided tail", text_color = color.silver)
+
+    table.cell(readout, 1, 4, str.tostring(tail * 100, "#.###") + "%", text_color = color.white)
+
+    table.cell(readout, 0, 5, "Last return", text_color = color.silver)
+
+    table.cell(readout, 1, 5, str.tostring((math.exp(r) - 1) * 100, "+#.###;-#.###") + "%", text_color = color.white)
+
+    table.cell(readout, 0, 6, "Move for z = ±2", text_color = color.silver)
+
+    table.cell(readout, 1, 6, str.tostring((math.exp(mu + s2 * tScale) - 1) * 100, "+#.##") + "% / " + str.tostring((math.exp(mu - s2 * tScale) - 1) * 100, "#.##") + "%", text_color = color.white)
+
+    table.cell(readout, 0, 7, "Move for z = ±3", text_color = color.silver)
+
+    table.cell(readout, 1, 7, str.tostring((math.exp(mu + s3 * tScale) - 1) * 100, "+#.##") + "% / " + str.tostring((math.exp(mu - s3 * tScale) - 1) * 100, "#.##") + "%", text_color = color.white)
+
+    table.cell(readout, 0, 8, "Window", text_color = color.silver)
+
+    table.cell(readout, 1, 8, str.tostring(window) + " bars", text_color = color.white)
+
+
