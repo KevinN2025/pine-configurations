@@ -1,0 +1,275 @@
+//@version=6
+// QQQ: live bar log-return z-score against completed returns in the past 30 calendar days.
+// This measures returns, not the distance of price from a 30-day price average.
+// Window: (asOf - 30 * 24 hours, asOf], selected by completed bars' closing timestamps.
+// asOf is the latest execution time on an open live bar, or the bar close in history/replay.
+// Current return is excluded from ALL baseline estimates, including Student-t df.
+// z = (current log return - historical mean) / historical sample standard deviation (ddof=1).
+// Student-t normal-equivalent z and model tail areas are estimates, not calibrated odds.
+// Rolling kurtosis/df is especially noisy on daily charts; the readout flags fewer than 100 samples.
+// Uses the chart's regular/extended session data. Needs >30 calendar days of loaded history.
+// Indicators update on incoming feed updates. The open bar's return/z is provisional until close;
+// its elapsed duration can be shorter than the completed returns used for comparison.
+// Supported: standard QQQ charts, 1 minute through 1 day. No shortened-window fallback.
+// Pine reference: https://www.tradingview.com/pine-script-docs/language/execution-model/
+indicator("QQQ 30-Day Return Z", shorttitle = "QQQ 30D Z", overlay = false, precision = 2)
+
+dfMode = input.string("Rolling moments", "Student-t degrees of freedom", options = ["Rolling moments", "Manual"])
+dfManual = input.float(4.0, "Manual df (user-supplied model assumption)", minval = 2.1, maxval = 30.0, step = 0.1)
+dropGap = input.bool(true, "Drop overnight gap on first intraday bar of session")
+showRaw = input.bool(true, "Also plot standard return z-score")
+confirmedAlerts = input.bool(true, "Alerts only on confirmed bar close")
+showTable = input.bool(true, "Show readout table")
+
+if barstate.isfirst
+    if syminfo.ticker != "QQQ"
+        runtime.error("Apply this script to a QQQ chart.")
+    if not chart.is_standard
+        runtime.error("Use standard price bars/candles, not synthetic chart prices.")
+    if not (timeframe.isminutes or (timeframe.isdaily and timeframe.multiplier == 1))
+        runtime.error("Use a time-based chart from 1 minute through 1 day.")
+
+// ---------- Pine-portable Student-t and normal distribution functions ----------
+logGamma(float x) =>
+    // Lanczos g=7, n=9. Callers here always pass x >= 0.5.
+    float y = x - 1.0
+    float total = 0.99999999999980993
+    total += 676.5203681218851 / (y + 1.0)
+    total += -1259.1392167224028 / (y + 2.0)
+    total += 771.32342877765313 / (y + 3.0)
+    total += -176.61502916214059 / (y + 4.0)
+    total += 12.507343278686905 / (y + 5.0)
+    total += -0.13857109526572012 / (y + 6.0)
+    total += 9.9843695780195716e-6 / (y + 7.0)
+    total += 1.5056327351493116e-7 / (y + 8.0)
+    float t = y + 7.5
+    0.5 * math.log(2.0 * math.pi) + (y + 0.5) * math.log(t) - t + math.log(total)
+
+betaContinuedFraction(float a, float b, float x) =>
+    float tiny = 1e-30
+    float qab = a + b
+    float qap = a + 1.0
+    float qam = a - 1.0
+    float c = 1.0
+    float d = 1.0 - qab * x / qap
+    d := 1.0 / (math.abs(d) / tiny > 1.0 ? d : tiny)
+    float h = d
+    for m = 1 to 300
+        float m2 = 2.0 * m
+        float aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d := 1.0 + aa * d
+        d := 1.0 / (math.abs(d) / tiny > 1.0 ? d : tiny)
+        c := 1.0 + aa / c
+        c := math.abs(c) / tiny > 1.0 ? c : tiny
+        h *= d * c
+        aa := -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d := 1.0 + aa * d
+        d := 1.0 / (math.abs(d) / tiny > 1.0 ? d : tiny)
+        c := 1.0 + aa / c
+        c := math.abs(c) / tiny > 1.0 ? c : tiny
+        float delta = d * c
+        h *= delta
+        // Pine comparisons round floats to 9 decimal places; scale the convergence test.
+        if math.abs(delta - 1.0) * 1e14 < 3.0
+            break
+    h
+
+regularizedBeta(float a, float b, float x) =>
+    float result = 0.0
+    if math.sign(x - 1.0) >= 0.0
+        result := 1.0
+    else if math.sign(x) > 0.0
+        float front = math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * math.log(x) + b * math.log(1.0 - x))
+        result := x < (a + 1.0) / (a + b + 2.0) ? front * betaContinuedFraction(a, b, x) / a : 1.0 - front * betaContinuedFraction(b, a, 1.0 - x) / b
+    math.min(1.0, math.max(0.0, result))
+
+tTwoSided(float x, float nu) =>
+    regularizedBeta(nu / 2.0, 0.5, nu / (nu + x * x))
+
+normalQuantileLower(float p) =>
+    // Acklam, lower region p < 0.02425 (the only region z_eq needs for small tails).
+    float q = math.sqrt(-2.0 * math.log(p))
+    (((((-7.784894002430293e-03 * q - 3.223964580411365e-01) * q - 2.400758277161838e+00) * q - 2.549732539343734e+00) * q + 4.374664141464968e+00) * q + 2.938163982698783e+00) / ((((7.784695709041462e-03 * q + 3.224671290700398e-01) * q + 2.445134137142996e+00) * q + 3.754408661907416e+00) * q + 1.0)
+
+normalQuantile(float p) =>
+    float result = na
+    if p < 0.02425
+        result := normalQuantileLower(p)
+    else if p > 1.0 - 0.02425
+        result := -normalQuantileLower(1.0 - p)
+    else
+        float q = p - 0.5
+        float rr = q * q
+        result := (((((-3.969683028665376e+01 * rr + 2.209460984245205e+02) * rr - 2.759285104469687e+02) * rr + 1.383577518672690e+02) * rr - 3.066479806614716e+01) * rr + 2.506628277459239e+00) * q / (((((-5.447609879822406e+01 * rr + 1.615858368580409e+02) * rr - 1.556989798598866e+02) * rr + 6.680131188771972e+01) * rr - 1.328068155288572e+01) * rr + 1.0)
+    result
+
+normalEquivalent(float x, float twoSidedTail) =>
+    float p = math.max(twoSidedTail, 1e-300)
+    x == 0.0 ? 0.0 : math.sign(x) * -normalQuantile(p / 2.0)
+
+
+// ---------- Stable, reversible central moments (values scaled to basis points) ----------
+addMoments(int n, float avg, float c2, float c3, float c4, float x) =>
+    float nextN = n + 1.0
+    float delta = x - avg
+    float step = delta / nextN
+    float term = delta * step * n
+    float next4 = c4 + term * step * step * (nextN * nextN - 3.0 * nextN + 3.0) + 6.0 * step * step * c2 - 4.0 * step * c3
+    float next3 = c3 + term * step * (nextN - 2.0) - 3.0 * step * c2
+    float next2 = c2 + term
+    [avg + step, next2, next3, next4]
+
+removeMoments(int n, float avg, float c2, float c3, float c4, float x) =>
+    float nextAvg = 0.0
+    float next2 = 0.0
+    float next3 = 0.0
+    float next4 = 0.0
+    if n > 1
+        nextAvg := avg + (avg - x) / (n - 1.0)
+        float step = (x - nextAvg) / n
+        float term = (x - nextAvg) * step * (n - 1.0)
+        next2 := math.max(0.0, c2 - term)
+        next3 := c3 - term * step * (n - 2.0) + 3.0 * step * next2
+        next4 := math.max(0.0, c4 - term * step * step * (n * float(n) - 3.0 * n + 3.0) - 6.0 * step * step * next2 + 4.0 * step * next3)
+    [nextAvg, next2, next3, next4]
+
+// ---------- Exact time window, with no trading-day-to-bar approximation ----------
+const int WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+// At >=1 minute, a 30-day window contains at most 43,200 completed bars, even for 24/7 data.
+// A ring buffer avoids shifting thousands of array elements on each execution.
+const int CAPACITY = 45000
+const float RETURN_SCALE = 10000.0
+var array<int> sampleTimes = array.new<int>(CAPACITY, 0)
+var array<float> sampleValues = array.new<float>(CAPACITY, 0.0)
+var int head = 0
+var int count = 0
+var float avg = 0.0
+var float c2 = 0.0
+var float c3 = 0.0
+var float c4 = 0.0
+var int firstLoadedTime = time
+
+int asOf = barstate.isrealtime and not barstate.isconfirmed ? math.min(timenow, time_close) : time_close
+int cutoff = asOf - WINDOW_MS
+float basePrice = dropGap and timeframe.isintraday and session.isfirstbar ? open : close[1]
+float r = close > 0.0 and basePrice > 0.0 ? math.log(close / basePrice) : na
+
+// All persistent state uses var, not varip. Pine rollback restores it before every live tick,
+// so r[1] is inserted exactly once per bar, including on reload, without accumulating ticks.
+while count > 0 and array.get(sampleTimes, head) <= cutoff
+    float expired = array.get(sampleValues, head)
+    [nextAvg, next2, next3, next4] = removeMoments(count, avg, c2, c3, c4, expired)
+    avg := nextAvg
+    c2 := next2
+    c3 := next3
+    c4 := next4
+    head := (head + 1) % CAPACITY
+    count -= 1
+
+// Insert only the previous completed return if it belongs to the current window.
+if not na(r[1]) and not na(time_close[1]) and time_close[1] > cutoff and time_close[1] <= asOf
+    if count >= CAPACITY
+        runtime.error("30-day return buffer exceeded; use a larger chart timeframe.")
+    float previous = r[1] * RETURN_SCALE
+    int slot = (head + count) % CAPACITY
+    array.set(sampleTimes, slot, time_close[1])
+    array.set(sampleValues, slot, previous)
+    [nextAvg, next2, next3, next4] = addMoments(count, avg, c2, c3, c4, previous)
+    avg := nextAvg
+    c2 := next2
+    c3 := next3
+    c4 := next4
+    count += 1
+
+bool fullWindow = firstLoadedTime <= cutoff
+bool enoughSamples = count >= 5
+float mu = count > 0 ? avg / RETURN_SCALE : na
+float sd = count > 1 ? math.sqrt(c2 / (count - 1.0)) / RETURN_SCALE : na
+bool ready = fullWindow and enoughSamples and not na(r) and sd > 0.0
+
+// Bias-corrected excess kurtosis and method-of-moments Student-t df, using ONLY this window.
+// The fitted family needs df > 4; Manual also permits 2 < df <= 4 (finite variance).
+// Nonpositive excess uses the upper df bound; fitted df is constrained to [4.1, 30].
+float n = count
+float excessRaw = count > 3 and c2 > 0.0 ? n * c4 / (c2 * c2) - 3.0 : na
+float excess = not na(excessRaw) ? (n - 1.0) * ((n + 1.0) * excessRaw + 6.0) / ((n - 2.0) * (n - 3.0)) : na
+float momentsDf = na(excess) ? na : excess <= 0.0 ? 30.0 : math.min(30.0, math.max(4.1, 4.0 + 6.0 / excess))
+float df = dfMode == "Manual" ? dfManual : momentsDf
+float tScale = sd * math.sqrt((df - 2.0) / df)
+float rawZ = ready ? (r - mu) / sd : na
+float score = ready and tScale > 0.0 ? (r - mu) / tScale : na
+float tail = na(score) ? na : tTwoSided(score, df)
+float zEq = na(score) ? na : normalEquivalent(score, tail)
+
+// ---------- Plots and alerts ----------
+color zColor = na(zEq) ? color.gray : math.abs(zEq) >= 3 ? (zEq > 0 ? color.lime : color.red) :
+     math.abs(zEq) >= 2 ? (zEq > 0 ? color.teal : color.orange) : color.new(color.gray, 40)
+plot(zEq, "Student-t normal-equivalent z (estimated model)", zColor, 2, plot.style_columns)
+plot(showRaw ? rawZ : na, "Standard return z-score", color.purple, 1)
+hline(0, "0", color.new(color.gray, 60))
+hline(1, "+1", color.new(color.gray, 75), hline.style_dotted)
+hline(-1, "-1", color.new(color.gray, 75), hline.style_dotted)
+hline(2, "+2", color.new(color.teal, 50), hline.style_dashed)
+hline(-2, "-2", color.new(color.orange, 50), hline.style_dashed)
+hline(3, "+3", color.new(color.lime, 40))
+hline(-3, "-3", color.new(color.red, 40))
+
+bool alertReady = ready and (not confirmedAlerts or barstate.isconfirmed)
+alertcondition(alertReady and math.abs(zEq) >= 2, "QQQ |t-z| >= 2", "QQQ {{interval}} return: |Student-t normal-equivalent z| >= 2 (30-calendar-day baseline)")
+alertcondition(alertReady and math.abs(zEq) >= 3, "QQQ |t-z| >= 3", "QQQ {{interval}} return: |Student-t normal-equivalent z| >= 3 (30-calendar-day baseline)")
+alertcondition(alertReady and math.abs(rawZ) >= 2, "QQQ |z| >= 2", "QQQ {{interval}} return: |standard z| >= 2 (30-calendar-day baseline)")
+alertcondition(alertReady and math.abs(rawZ) >= 3, "QQQ |z| >= 3", "QQQ {{interval}} return: |standard z| >= 3 (30-calendar-day baseline)")
+
+// t score whose two-sided tail equals a given two-sided normal tail (bisection; last bar only).
+tScoreForTail(float goal, float nu) =>
+    float lo = 0.0
+    float hi = 1000.0
+    for i = 1 to 80
+        float mid = 0.5 * (lo + hi)
+        if tTwoSided(mid, nu) > goal
+            lo := mid
+        else
+            hi := mid
+    0.5 * (lo + hi)
+
+// Two-sided normal tails: P(|Z| >= 2) and P(|Z| >= 3).
+float TAIL2 = 0.04550026389635842
+float TAIL3 = 0.0026997960632601866
+
+// ---------- Readout also explains unavailable output during warm-up ----------
+var table readout = table.new(position.top_right, 2, 13, bgcolor = color.new(color.black, 20), border_width = 1)
+if barstate.islast
+    if showTable
+        bool modelReady = not na(score)
+        string status = not fullWindow ? "Load >30 calendar days of history" : not enoughSamples ? "Need at least 5 completed returns" : na(r) ? "Current return unavailable" : not (sd > 0.0) ? "Zero/unavailable return variance" : dfMode == "Rolling moments" and count < 100 ? "Ready; df estimate has <100 samples" : "Ready"
+        color statusColor = not modelReady ? color.orange : dfMode == "Rolling moments" and count < 100 ? color.yellow : color.lime
+        float s2 = modelReady ? tScoreForTail(TAIL2, df) : na
+        float s3 = modelReady ? tScoreForTail(TAIL3, df) : na
+        table.cell(readout, 0, 0, "Symbol / timeframe", text_color = color.silver)
+        table.cell(readout, 1, 0, syminfo.tickerid + " / " + timeframe.period, text_color = color.white)
+        table.cell(readout, 0, 1, "Status", text_color = color.silver)
+        table.cell(readout, 1, 1, status, text_color = statusColor)
+        table.cell(readout, 0, 2, "Student-t df (" + dfMode + ")", text_color = color.silver)
+        table.cell(readout, 1, 2, modelReady ? str.tostring(df, "#.##") : "n/a", text_color = color.white)
+        table.cell(readout, 0, 3, "t-adjusted z (estimate)", text_color = color.silver)
+        table.cell(readout, 1, 3, modelReady ? str.tostring(zEq, "+#.##;-#.##") : "n/a", text_color = zColor)
+        table.cell(readout, 0, 4, "Standard return z", text_color = color.silver)
+        table.cell(readout, 1, 4, not na(rawZ) ? str.tostring(rawZ, "+#.##;-#.##") : "n/a", text_color = color.white)
+        table.cell(readout, 0, 5, "Model two-sided tail", text_color = color.silver)
+        table.cell(readout, 1, 5, modelReady ? str.tostring(tail * 100.0, "#.###") + "%" : "n/a", text_color = color.white)
+        table.cell(readout, 0, 6, "Current bar return", text_color = color.silver)
+        table.cell(readout, 1, 6, not na(r) ? str.tostring((math.exp(r) - 1.0) * 100.0, "+#.###;-#.###") + "%" : "n/a", text_color = color.white)
+        table.cell(readout, 0, 7, "Move for t-z = +/-2", text_color = color.silver)
+        table.cell(readout, 1, 7, modelReady ? str.tostring((math.exp(mu + s2 * tScale) - 1.0) * 100.0, "+#.##;-#.##") + "% / " + str.tostring((math.exp(mu - s2 * tScale) - 1.0) * 100.0, "+#.##;-#.##") + "%" : "n/a", text_color = color.white)
+        table.cell(readout, 0, 8, "Move for t-z = +/-3", text_color = color.silver)
+        table.cell(readout, 1, 8, modelReady ? str.tostring((math.exp(mu + s3 * tScale) - 1.0) * 100.0, "+#.##;-#.##") + "% / " + str.tostring((math.exp(mu - s3 * tScale) - 1.0) * 100.0, "+#.##;-#.##") + "%" : "n/a", text_color = color.white)
+        table.cell(readout, 0, 9, "Baseline", text_color = color.silver)
+        table.cell(readout, 1, 9, "30 calendar days / " + str.tostring(count) + " completed returns", text_color = color.white)
+        table.cell(readout, 0, 10, "Window start (exclusive)", text_color = color.silver)
+        table.cell(readout, 1, 10, str.format_time(cutoff, "yyyy-MM-dd HH:mm", syminfo.timezone), text_color = color.white)
+        table.cell(readout, 0, 11, "As of (exchange time)", text_color = color.silver)
+        table.cell(readout, 1, 11, str.format_time(asOf, "yyyy-MM-dd HH:mm", syminfo.timezone), text_color = color.white)
+        table.cell(readout, 0, 12, "Current bar / alerts", text_color = color.silver)
+        table.cell(readout, 1, 12, (barstate.isconfirmed ? "Closed" : "Provisional") + (confirmedAlerts ? " / close only" : " / intrabar allowed"), text_color = barstate.isconfirmed ? color.white : color.yellow)
+    else
+        table.clear(readout, 0, 0, 1, 12)
